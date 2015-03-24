@@ -37,6 +37,7 @@ Pour réinitialiser ce jeton, vous pouvez utiliser la commande suivante :
 wget https://raw.githubusercontent.com/cozy/cozy-setup/master/fabfile.py
 fab -H user@ip reset_security_tokens
 ```
+Pour utiliser cette commande, vous devez avoir Fabric d'installé sur votre machine locale.
 
 Vous devriez également modifier les accréditations du super utilisateur (et utiliser une clé SSH de préférence à un mot de passe pour vous connecter à la machine hébergeant votre Cozy, comme expliqué dans [ce tutoriel](http://www.debian-administration.org/article/SSH_with_authentication_key_instead_of_password) (en anglais)).
 
@@ -90,7 +91,9 @@ fab -H sudoer@localhost install
 
 #### Installer Cozy avec Apache
 
-Pour utiliser le serveur web Apache plutôt que celui installé avec Cozy, il est nécessaire de modifier le fichier `fabfile.py` pour commenter l'installation de nginx (insérer un # devant l'appel de `install_nginx()` dans la fonction `install()`), avant de lancer la commande `fab -H …` d'une part, puis d'autre part d'installer et d'activer les modules `proxy` et `proxy_http` d'Apache. Enfin il faudra définir un fichier vhost `cozy.conf` contenant ceci :
+Pour utiliser le serveur web Apache plutôt que celui installé avec Cozy, il est nécessaire de modifier le fichier `fabfile.py` pour commenter l'installation de nginx (insérer un # devant l'appel de `install_nginx()` dans la fonction `install()`), avant de lancer la commande `fab -H …`.
+
+Ensuite, il faudra définir un fichier vhost `cozy.conf` contenant ceci :
 
 ```
     # /etc/apache2/sites-available/cozy.conf
@@ -114,6 +117,95 @@ Pour utiliser le serveur web Apache plutôt que celui installé avec Cozy, il es
 
      </VirtualHost>
     </IfModule>
+```
+
+Assurez-vous enfin que les modules `proxy` et `proxy_http` d’Apache sont installés et activés :
+
+```bash
+a2enmod proxy
+a2enmod proxy_http
+service apache2 restart
+```
+#### Utiliser son propre serveur Nginx
+
+L'installation par défaut de Cozy installe une instance de Nginx, avec une configuration spécifique. Celle-ci redirige toutes les requêtes vers votre instance Cozy.
+Mais vous pourriez avoir besoin d'utiliser votre propre serveur Nginx.
+
+Selon votre fichier `nginx.conf` vous pourriez avoir besoin d'adapter les chemins de fichiers qui suivent.
+
+##### Créer un certificat autp-signé
+
+Tapez les commandes suivantes :
+
+```
+cd /etc/cozy
+openssl dhparam -out ./dh2048.pem -outform PEM -2 2048' #pretty long
+openssl genrsa -out ./server.key 2048')
+openssl req -new -x509 -days 3650 -key ./server.key -out ./server.crt
+chmod 640 server.key
+```
+
+Attention, lors de la dernière commande `openssl`. Les champs ne sont pas obligatoires, *à l'exception* du champ`Common Name`. Il doit correspondre au nom de votre hôte, par exemple: `cozy.mydomain.com`
+
+##### Créer a vitual host
+
+Une fois fait, créez un virtual host spécifique pour votre instance Cozy. Par exemple, en utilisant le fichier `conf.d/cozy.conf` :
+
+```
+server {
+    listen 443;
+    server_name cozy.mydomain.com;
+    ssl_certificate /etc/cozy/server.crt;
+    ssl_certificate_key /etc/cozy/server.key;
+    ssl_dhparam /etc/cozy/dh2048.pem;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout  10m;
+    ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
+    ssl_ciphers ALL:!aNULL:!eNULL:!LOW:!EXP:!RC4:!3DES:+HIGH:+MEDIUM;
+    ssl_prefer_server_ciphers   on;
+    ssl on;
+
+    gzip_vary on;
+    client_max_body_size 1024M;
+
+    add_header Strict-Transport-Security max-age=2678400;
+
+    location / {
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host $http_host;
+        proxy_redirect http:// https://;
+        proxy_pass http://127.0.0.1:9104;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    access_log /var/log/nginx/cozy.log;
+}
+
+# Always redirect http:// to https://
+server {
+    listen 80;
+    server_name cozy.mydomain.com;
+    return 301 https://$host$request_uri;
+}
+```
+Redémarrez votre serveur
+
+```
+service nginx restart
+```
+cozy.mydomain.com. Bien sûr, les zones DNS doivent être correctement configurées.
+
+##### Cas sépcifique : DavDroid
+
+Si vous comptez synchroniser votre Cozy avec un périphérique Android en utilisant DavDroid, vous allez devoir faire plusieurs choses. Suivez les instructions de [ce lien](https://davdroid.bitfire.at/faq/entry/importing-a-certificate).
+La méthode automatique utilisant `CaDroid` est rapide et efficace.
+
+Attention: comme vous avez mis en place un reverse-proxy pour votre instance Cozy, vous devez spécifier l'URL complète lorsque vous configurez votre compte DavDroid, par exemple: 'https://cozy.mydomain.com/public/sync/principals/me`. Dans le cas contraire, vous rencontrerez cette erreur:
+
+```
+Capacités manquantes. Invalid DAV response. Ni CalDAV ni CarDAV n'est disponible.
 ```
 
 #### Essayer Cozy avec Vagrant
@@ -157,78 +249,6 @@ consulter la [description de l’architecture (en)](/en/hack/getting-started/arc
 Du fait du grand nombre de technologies mises en œuvre, nous recommandons
 de faire tourner les instances Cozy dans un environnement isolé, une machine
 virtuelle ou un conteneur (OpenVz ou LXC).
-
-## Utiliser une recette Ansible
-
-[Ansible](http://www.ansible.com) est un système de configuration simple qui permet
-d’automatiser l’installation et la mise à jour de services sur un serveur
-distant. Du fait de sa simplicité, il est très populaire chez les gens qui
-hébergent des services sur un serveur personnel.
-
-Ansible est basé sur le concept de recettes. Une recette décrit l’état d’un
-service et tout ce dont il a besoin pour fonctionner correctement. Si certains
-des prérequis manquent, Ansible va s’occuper d’amener le service dans l’état
-attendu.
-
-Commencez par [installer Ansible](http://docs.ansible.com/intro_installation.html)
-sur votre machine locale. Requiert la version 1.4 ou ultérieure :
-
-```bash
-# Installer ansible (pour Ubuntu 14.04)
-sudo apt-add-repository ppa:ansible/ansible
-sudo apt-get update
-sudo apt-get install ansible
-```
-
-Puis récupérez la recette Cozy (qui est maintenue par la communauté) :
-
-```bash
-git clone https://github.com/Kloadut/ansible-cozy-playbook.git
-cd ansible-cozy-playbook
-```
-
-Cozy a besoin de versions spécifiques de certains logiciels (Node.js,
-CouchDB, etc.). Le site [Ansible Galaxy](https://galaxy.ansible.com/)
-est un dépôt où les utilisateurs partagent les rôles (une recette est
-un ensemble de rôles) pour installer de nombreux logiciels. Voici
-comment installer les rôles de la recette Cozy :
-
-```bash
-ansible-galaxy install -r galaxy.yml -p ./roles
-```
-
-Vous devez sauvegarder les paramètres du serveur distant sur lequel vous voulez
-installer Cozy :
-
-```bash
-echo "[monserveur]" > hosts
-echo "adresse.ip.du.serveur" >> hosts
-```
-
-Modifiez les trois jetons de sécurité contenus dans le fichier
-`./roles/Kloadut.cozy/vars/main.yml`. Vous pouvez générer ces jetons de manière
-aléatoire avec la commande qui suit (vous n'aurez pas à vous en souvenir par la
-suite) :
-
-```bash
-< /dev/urandom tr -dc _A-Z-a-z-0-9 | head -c16
-```
-
-Vous pouvez alors installer Cozy en exécutant la recette.  Vous pouvez
-l’exécuter autant de fois que vous voulez. Elle s’assurera que votre instance
-est dans l’état attendu.
-
-```bash
-# Exécuter la recette
-ansible-playbook playbook.yml -i hosts -u root
-```
-
-**Note :** Si vous rencontrez une erreur lors de l'installation de cozy-indexer,
-vérifiez que vous possédez assez de RAM ou que votre serveur possède bien un
-fichier de swap.
-
-La recette achevée, votre instance devrait être à l’écoute sur le port
-443, il ne vous reste plus qu’à jouer avec !
 
 
 ## Utiliser l’image pour Raspberry Pi 2
@@ -423,6 +443,7 @@ vzctl start ctid
 Vous pouvez naturellement remplacer 8888 par le port que vous souhaitez exposer
 à l’extérieur.
 
+
 ## Image LXC
 
 Utilisez l’interface Web de configuration de LXC pour ajouter et configurer des
@@ -492,13 +513,49 @@ server {
 Une fois Nginx redémarré, votre instance devrait être accessible sur `http://cloud.myhost.com`.
 
 
+## Docker image
+
+
+*Vous aurez besoin d'une version 1.0.1 de [Docker](https://www.docker.com/)
+ou supérieur.*
+
+Vous pouvez essayer Cozy très simplement en téléchargeant l'image officielle
+depuis Docker Hub :
+
+```
+sudo docker pull cozy/full
+```
+
+Si vous souhaitez l'utiliser dans un environnement de production, il est
+recommandé de construite l'image sur votre machine :
+
+```
+sudo docker build -t cozy/full github.com/cozy-labs/cozy-docker
+```
+
+Vous pouvez ensuite lancer l'image avec la commande :
+
+```
+sudo docker run -d -p 80:80 -p 443:443 cozy/full
+```
+
+Il vous est possible de changer les ports affectés l'image, par exemple si
+les ports 80 et 443 sont déjà utilisé :
+```
+sudo docker run -d -p 6500:443 cozy/full
+```
+
+Vous pouvez ensuite accéder à votre Cozy en vous rendant sur
+https://localhost:443 (ou https://localhost:6500 pour le deuxième exemple)
+
+
 ## Héberger une instance de Cozy chez un prestataire
 
 ### CozyCloud
 
 [Cozycloud](https://cozycloud.cc) est la société qui développe le projet Cozy.
 Nous pouvons vous fournir gratuitement, en échange de retours, une instance.
-Envoyez-nous simplement [un message](mailto:contact@cozycloud.cc).
+Envoyez-nous simplement un message [via le formulaire d'inscription](/fr/#instance-request).
 
 ### Serveurs virtuels
 
